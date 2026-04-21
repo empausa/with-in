@@ -104,16 +104,34 @@
     50%      { transform: scale(1.014); }
   }
 
-  /* The invitation */
-  #invitation {
+  /* The invitations — a column of quiet lines, one per experiment */
+  #invitations {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1.1em;
+    margin: 0;
+    padding: 0;
+  }
+  .invitation {
+    background: transparent;
+    border: none;
+    font: inherit;
+    color: inherit;
     font-size: 1.05rem;
     font-style: italic;
     font-weight: 300;
     letter-spacing: 0.02em;
-    opacity: 0;
-    margin: 0;
-    transition: opacity var(--slower) var(--ease);
+    padding: 0.2em 0.8em;
     cursor: pointer;
+    opacity: 0;
+    transition: opacity var(--slower) var(--ease);
+    user-select: none;
+  }
+  .invitation:hover,
+  .invitation:focus-visible {
+    opacity: 0.9 !important;
+    outline: none;
   }
 
   /* The breath */
@@ -201,7 +219,8 @@
   #word-input::placeholder { color: currentColor; opacity: 0.25; font-style: italic; }
 
   /* Kept in today */
-  #kept {
+  #kept,
+  #rest-line {
     position: absolute;
     bottom: 8vh;
     left: 50%;
@@ -216,18 +235,30 @@
     pointer-events: none;
   }
 
-  /* State-driven visibility */
-  body[data-state="ambient"] #mark,
-  body[data-state="invited"] #mark { opacity: 0.92; }
-  body[data-state="invited"] #invitation { opacity: 0.55; }
-  body[data-state="minute"] #mark { opacity: 0; transform: scale(0.96); }
-  body[data-state="minute"] #breath { opacity: 1; }
-  body[data-state="leave-word"] #breath { opacity: 0; }
-  body[data-state="leave-word"] #leave { opacity: 1; pointer-events: auto; }
-  body[data-state="still"] #leave { opacity: 0; }
-  body[data-state="still"] #mark { opacity: 0; }
-  body[data-state="still"] #kept { opacity: 0.75; }
-  body[data-state="ambient"]:not([data-just-kept]) #kept { opacity: 0; }
+  /* State-driven visibility — dual attributes on <body>:
+     data-experiment: "none" | "minute" | "gaze"   (null when on home)
+     data-home:       "ambient" | "invited"         (only meaningful when experiment="none")
+     data-step:       "breath" | "leave-word" | "still" | "gaze" | "gaze-rest"
+  */
+
+  /* The mark shows on home; fades during any experiment */
+  body[data-experiment="none"] #mark { opacity: 0.92; }
+  body[data-experiment="minute"] #mark,
+  body[data-experiment="gaze"]   #mark { opacity: 0; transform: scale(0.96); }
+
+  /* Invitations visible when home reaches "invited" */
+  body[data-experiment="none"][data-home="invited"] .invitation { opacity: 0.55; }
+
+  /* Breath SVG is visible only during Minute's breath step */
+  body[data-step="breath"] #breath { opacity: 1; }
+
+  /* Leave prompt visible during the leave-word step */
+  body[data-step="leave-word"] #leave { opacity: 1; pointer-events: auto; }
+
+  /* Kept line shows briefly during the still step */
+  body[data-step="still"]     #kept      { opacity: 0.75; }
+  /* Rest line shows briefly at the end of a Gaze */
+  body[data-step="gaze-rest"] #rest-line { opacity: 0.75; }
 
   /* Discreet knobs at the bottom — present, never loud */
   .knobs {
@@ -293,10 +324,9 @@
   }
   .knob-sep { opacity: 0.35; }
 
-  /* Knobs vanish during the ritual */
-  body[data-state="minute"] .knobs,
-  body[data-state="leave-word"] .knobs,
-  body[data-state="still"] .knobs {
+  /* Knobs vanish during any experiment */
+  body[data-experiment="minute"] .knobs,
+  body[data-experiment="gaze"]   .knobs {
     opacity: 0;
     pointer-events: none;
   }
@@ -330,9 +360,8 @@
     line-height: 1.55;
     transition: opacity 0.8s var(--ease);
   }
-  body[data-state="minute"] .words-panel,
-  body[data-state="leave-word"] .words-panel,
-  body[data-state="still"] .words-panel {
+  body[data-experiment="minute"] .words-panel,
+  body[data-experiment="gaze"]   .words-panel {
     opacity: 0 !important;
     pointer-events: none;
   }
@@ -347,13 +376,13 @@
   }
 </style>
 </head>
-<body data-state="ambient">
+<body data-home="ambient" data-experiment="none" data-step="">
   <canvas id="field" aria-hidden="true"></canvas>
   <main>
     <div id="mark" aria-label="within">
       <span id="mark-inner"><span class="w">w</span><span class="slash">/</span><span class="in">in</span></span>
     </div>
-    <p id="invitation">take a minute</p>
+    <div id="invitations" aria-label="experiments"></div>
     <div id="breath" aria-hidden="true">
       <svg viewBox="-100 -100 200 200" preserveAspectRatio="xMidYMid meet">
         <circle id="breath-circle" cx="0" cy="0" r="38" />
@@ -365,6 +394,7 @@
       <input id="word-input" type="text" maxlength="16" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" inputmode="text" aria-label="a word" />
     </div>
     <p id="kept">kept in today</p>
+    <p id="rest-line">rest.</p>
   </main>
   <div id="words-panel" class="words-panel" aria-hidden="true" hidden></div>
   <nav class="knobs" aria-label="controls">
@@ -385,7 +415,7 @@
   "use strict";
 
   // ────── States ──────
-  const S = { AMBIENT: "ambient", INVITED: "invited", MINUTE: "minute", LEAVE: "leave-word", STILL: "still" };
+  // Legacy S enum removed — state now lives on body dataset via setHome/setExperiment/setStep
 
   // ────── Utils ──────
   const lerp  = (a, b, t) => a + (b - a) * t;
@@ -666,6 +696,12 @@
       if (t01 >= 1) freshSeed = null;
     }
 
+    // Active experiment's own layer (e.g., Gaze light), if any
+    if (currentExperiment) {
+      const exp = EXPERIMENTS.find((e) => e.id === currentExperiment);
+      if (exp && exp.draw) exp.draw(t, pal);
+    }
+
     // rAF when visible (smooth); setTimeout when hidden (keeps state
     // correct for headless screenshots + background tabs).
     if (document.visibilityState === "visible") {
@@ -674,33 +710,90 @@
       setTimeout(() => drawField(performance.now()), 120);
     }
   }
-  drawField(performance.now());
+  // First paint is kicked off at the very bottom of the module, once all
+  // state/registry declarations are initialized (see bottom of this script).
 
   // ────── UI refs ──────
   const els = {
     body: document.body,
     mark: document.getElementById("mark"),
-    invitation: document.getElementById("invitation"),
+    invitations: document.getElementById("invitations"),
     breath: document.getElementById("breath"),
     breathCircle: document.getElementById("breath-circle"),
     breathWord: document.getElementById("breath-word"),
     leave: document.getElementById("leave"),
     wordInput: document.getElementById("word-input"),
     kept: document.getElementById("kept"),
+    restLine: document.getElementById("rest-line"),
   };
 
-  let state = S.AMBIENT;
-  function setState(s) {
-    state = s;
-    els.body.dataset.state = s;
+  // ────── State model ──────
+  // Three orthogonal axes, mirrored to body dataset so CSS can select them.
+  //   home:       "ambient" | "invited"    (only meaningful when experiment === null)
+  //   experiment: null | "minute" | "gaze" (which experiment is currently running)
+  //   step:       ""  | "breath" | "leave-word" | "still" | "gaze" | "gaze-rest"
+  let currentHome = "ambient";
+  let currentExperiment = null;
+  let currentStep = "";
+
+  function setHome(h) {
+    currentHome = h;
+    els.body.dataset.home = h;
   }
+  function setExperiment(id) {
+    currentExperiment = id;
+    els.body.dataset.experiment = id || "none";
+  }
+  function setStep(s) {
+    currentStep = s || "";
+    els.body.dataset.step = s || "";
+  }
+  function isHome() { return currentExperiment === null; }
+
+  // Returning home: clears experiment + step, resets home to ambient, reschedules invitation.
+  function goHome() {
+    setExperiment(null);
+    setStep("");
+    setHome("ambient");
+    scheduleInvitation();
+  }
+
+  // Entering an experiment: preserved invariant — only from home.
+  function enterExperiment(id) {
+    if (!isHome()) return;
+    const exp = EXPERIMENTS.find((e) => e.id === id);
+    if (!exp) return;
+    clearTimeout(invitationTimer);
+    if (typeof wordsPanelOpen !== "undefined" && wordsPanelOpen) closeWordsPanel();
+    setExperiment(id);
+    exp.enter();
+  }
+
+  // ────── Experiments registry ──────
+  // Each experiment: id, a label function (read lazily so it follows LANG),
+  // an enter handler that starts its internal flow, and an optional draw(t, pal)
+  // hook called from drawField when the experiment is active.
+  // runMinute / gazeStart / gazeDraw / gazeCancel are defined further down.
+  const EXPERIMENTS = [
+    {
+      id: "minute",
+      label: () => STRINGS[LANG].experiments.minute,
+      enter: () => runMinute(),
+    },
+    {
+      id: "gaze",
+      label: () => STRINGS[LANG].experiments.gaze,
+      enter: () => gazeStart(),
+      draw:  (t, pal) => gazeDraw(t, pal),
+    },
+  ];
 
   // ────── Ambient → Invited ──────
   let invitationTimer = null;
   function scheduleInvitation() {
     clearTimeout(invitationTimer);
     invitationTimer = setTimeout(() => {
-      if (state === S.AMBIENT) setState(S.INVITED);
+      if (isHome() && currentHome === "ambient") setHome("invited");
     }, 4200);
   }
   scheduleInvitation();
@@ -714,18 +807,20 @@
 
   const STRINGS = {
     en: {
-      invitation: "take a minute",
+      experiments: { minute: "take a minute", gaze: "a gaze" },
       prompt: "leave a word, or close your eyes and go",
       kept: "kept in today",
+      rest: "rest.",
       sound: "sound",
       scenes: { breath: "breath", tide: "tide", lights: "lights" },
       words: "words",
     },
     pt: {
       // EU Portuguese, intimate tu-form; chosen for quiet, not protocol
-      invitation: "um minuto para ti",
+      experiments: { minute: "um minuto para ti", gaze: "um olhar" },
       prompt: "deixa uma palavra, ou fecha os olhos e vai",
       kept: "guardado hoje",
+      rest: "descansa.",
       sound: "som",
       scenes: { breath: "respiro", tide: "maré", lights: "luzes" },
       words: "palavras",
@@ -772,10 +867,30 @@
   const wordPool = WORD_POOLS[LANG];
 
   // Apply strings to the DOM
-  document.getElementById("invitation").textContent = STRINGS[LANG].invitation;
   document.querySelector("#leave .prompt").textContent = STRINGS[LANG].prompt;
   document.getElementById("kept").textContent = STRINGS[LANG].kept;
+  document.getElementById("rest-line").textContent = STRINGS[LANG].rest;
   document.querySelector("#btn-sound .label").textContent = STRINGS[LANG].sound;
+
+  // Render one invitation per experiment, into #invitations.
+  // Each invitation is a <button> for a11y: focusable, keyboard-activatable.
+  (function renderInvitations() {
+    const host = els.invitations;
+    host.innerHTML = "";
+    for (const exp of EXPERIMENTS) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "invitation";
+      btn.dataset.experimentId = exp.id;
+      btn.textContent = exp.label();
+      btn.addEventListener("pointerdown", (e) => e.stopPropagation());
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        enterExperiment(exp.id);
+      });
+      host.appendChild(btn);
+    }
+  })();
   function updateSceneLabel() {
     document.querySelector("#btn-scene .label").textContent = STRINGS[LANG].scenes[currentScene];
   }
@@ -875,33 +990,36 @@
     cycleScene();
   });
 
-  function canStart() { return state === S.AMBIENT || state === S.INVITED; }
-
-  function startMinute() {
-    if (!canStart()) return;
-    clearTimeout(invitationTimer);
-    if (typeof wordsPanelOpen !== "undefined" && wordsPanelOpen) closeWordsPanel();
-    setState(S.MINUTE);
-    runMinute();
-  }
-
+  // ────── Global input: home affordance + per-experiment keys ──────
+  // On home: Space/Enter/tap runs the first invitation (keeps current muscle memory for the Minute).
+  // During leave-word: Enter submits, Escape quiets home.
+  // During gaze: Escape quiets home.
   document.addEventListener("keydown", (e) => {
-    if (e.key === " " && canStart()) {
+    if (isHome() && e.key === " ") {
       e.preventDefault();
-      startMinute();
-    } else if (state === S.LEAVE) {
-      if (e.key === "Enter") { e.preventDefault(); submitWord(); }
+      const first = EXPERIMENTS[0];
+      if (first) enterExperiment(first.id);
+      return;
+    }
+    if (currentStep === "leave-word") {
+      if (e.key === "Enter")       { e.preventDefault(); submitWord(); }
       else if (e.key === "Escape") { e.preventDefault(); quietReturn(); }
+    } else if (currentExperiment === "gaze") {
+      if (e.key === "Escape") { e.preventDefault(); gazeCancel(); }
     }
   });
 
   document.addEventListener("pointerdown", (e) => {
-    if (e.target.closest("input")) return;
-    if (canStart()) startMinute();
+    if (e.target.closest("input") || e.target.closest(".invitation") || e.target.closest(".knob")) return;
+    if (isHome()) {
+      const first = EXPERIMENTS[0];
+      if (first) enterExperiment(first.id);
+    }
   });
 
   // ────── The Minute ──────
   async function runMinute() {
+    setStep("breath");
     // Pick a word for the Minute
     const seed = hashString(dayKey() + ":" + Math.floor(Date.now() / 60000));
     const minuteWord = wordPool[seed % wordPool.length];
@@ -918,7 +1036,7 @@
     const R_MIN = 38, R_MAX = 84;
 
     function tick() {
-      if (state !== S.MINUTE) return; // user left early
+      if (currentStep !== "breath") return; // user left early
       const now = performance.now();
       const elapsed = now - start;
 
@@ -965,12 +1083,12 @@
   function bumpLeaveIdle() {
     clearTimeout(leaveIdleTimer);
     leaveIdleTimer = setTimeout(() => {
-      if (state === S.LEAVE) quietReturn();
+      if (currentStep === "leave-word") quietReturn();
     }, LEAVE_IDLE_MS);
   }
 
   function leaveAWord() {
-    setState(S.LEAVE);
+    setStep("leave-word");
     setTimeout(() => els.wordInput.focus({ preventScroll: true }), 700);
     bumpLeaveIdle();
   }
@@ -982,42 +1100,111 @@
     renderStill(v);
   }
 
-  // A "soft" return: no mark saved, no Still — just fade back to ambient.
-  // Used for Escape, empty submit, and the idle timeout.
+  // A "soft" return from the Minute's leave-word step: no mark saved, no Still.
   function quietReturn() {
     clearTimeout(leaveIdleTimer);
     els.wordInput.value = "";
-    setState(S.AMBIENT);
-    scheduleInvitation();
+    goHome();
   }
 
   // Reset the idle timer on every keystroke in the input
   els.wordInput.addEventListener("input", () => {
-    if (state === S.LEAVE) bumpLeaveIdle();
+    if (currentStep === "leave-word") bumpLeaveIdle();
   });
 
   // ────── The Still ──────
   function renderStill(seedSource) {
-    setState(S.STILL);
+    setStep("still");
     const seed = hashString(seedSource + ":" + dayKey() + ":" + new Date().getHours());
     saveMark({ seed, word: seedSource, t: Date.now() });
     freshSeed = seed;
     freshBornAt = performance.now();
     refreshWordsKnob();
 
-    // After the still holds, return to ambient
+    // After the still holds, return home
     setTimeout(() => {
       els.wordInput.value = "";
-      setState(S.AMBIENT);
-      scheduleInvitation();
+      goHome();
     }, STILL_HOLD_MS);
+  }
+
+  // ────── A Gaze ──────
+  // A 60-second visual rest. A single soft point of light traces a slow
+  // Lissajous path across the central ~70% of the viewport. No input, no artifact.
+  // At 60s the point fades, a soft closing line holds ~3s, then home returns.
+  // Escape cancels without showing the line.
+  const GAZE_TOTAL_MS    = 60000;
+  const GAZE_FADE_IN_MS  = 2500;
+  const GAZE_FADE_OUT_MS = 2000;
+  const GAZE_REST_HOLD_MS = 3000;
+
+  let gazeStartTime = 0;
+  let gazeEndTimer = null;
+  let gazeRestTimer = null;
+  // Seed phases by day so the curve varies day to day but is stable within a day
+  let gazePhaseX = 0, gazePhaseY = 0;
+
+  function gazeStart() {
+    setStep("gaze");
+    gazeStartTime = performance.now();
+    const dSeed = hashString("gaze:" + dayKey());
+    gazePhaseX = (dSeed & 0xffff) / 0xffff * Math.PI * 2;
+    gazePhaseY = ((dSeed >>> 16) & 0xffff) / 0xffff * Math.PI * 2;
+    clearTimeout(gazeEndTimer);
+    clearTimeout(gazeRestTimer);
+    // Natural end: fade out point, show rest line, then go home
+    gazeEndTimer = setTimeout(() => {
+      if (currentExperiment !== "gaze") return;
+      setStep("gaze-rest");
+      gazeRestTimer = setTimeout(() => {
+        if (currentExperiment !== "gaze") return;
+        goHome();
+      }, GAZE_REST_HOLD_MS);
+    }, GAZE_TOTAL_MS);
+  }
+
+  function gazeCancel() {
+    clearTimeout(gazeEndTimer);
+    clearTimeout(gazeRestTimer);
+    goHome();
+  }
+
+  function gazeDraw(_t, pal) {
+    if (currentExperiment !== "gaze") return;
+    // Only paint the point during the gaze step (not during gaze-rest).
+    if (currentStep !== "gaze") return;
+    const elapsed = performance.now() - gazeStartTime;
+    // Alpha: fade in over first 2.5s, hold, fade out over last 2s
+    let alpha;
+    if (elapsed < GAZE_FADE_IN_MS) {
+      alpha = easeInOutSine(elapsed / GAZE_FADE_IN_MS);
+    } else if (elapsed > GAZE_TOTAL_MS - GAZE_FADE_OUT_MS) {
+      alpha = 1 - easeInOutSine((elapsed - (GAZE_TOTAL_MS - GAZE_FADE_OUT_MS)) / GAZE_FADE_OUT_MS);
+    } else {
+      alpha = 1;
+    }
+    alpha = clamp(alpha, 0, 1) * 0.85;
+    if (alpha <= 0.001) return;
+
+    // Lissajous in seconds, confined to central ~70% of the viewport.
+    const ts = elapsed / 1000;
+    const x = (0.5 + 0.32 * Math.sin(0.25 * ts + gazePhaseX)) * W;
+    const y = (0.5 + 0.28 * Math.sin(0.38 * ts + gazePhaseY)) * H;
+    const r = Math.min(W, H) * 0.04; // ~24-40px depending on viewport
+
+    const rg = ctx.createRadialGradient(x, y, 0, x, y, r);
+    rg.addColorStop(0,   rgba(pal.accent, 0.95 * alpha));
+    rg.addColorStop(0.5, rgba(pal.accent, 0.35 * alpha));
+    rg.addColorStop(1,   rgba(pal.accent, 0));
+    ctx.fillStyle = rg;
+    ctx.fillRect(x - r, y - r, r * 2, r * 2);
   }
 
   // ────── Tab visibility: pause invitation timing while hidden ──────
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
       clearTimeout(invitationTimer);
-    } else if (state === S.AMBIENT) {
+    } else if (isHome() && currentHome === "ambient") {
       scheduleInvitation();
     }
   });
@@ -1088,10 +1275,19 @@
 
   // Initial paint
   refreshWordsKnob();
+  // Kickstart the draw loop now that all state/registry declarations are live.
+  drawField(performance.now());
 
   // ────── Dev hook (kept for the prototype; harmless) ──────
   if (new URLSearchParams(location.search).has("dev")) {
-    window.__within = { setState, renderStill, submitWord, quietReturn, startMinute, S, refreshWordsKnob, freshSeedPeek: () => freshSeed };
+    window.__within = {
+      setHome, setExperiment, setStep, goHome, enterExperiment,
+      renderStill, submitWord, quietReturn,
+      gazeStart, gazeCancel,
+      refreshWordsKnob,
+      state: () => ({ home: currentHome, experiment: currentExperiment, step: currentStep }),
+      freshSeedPeek: () => freshSeed,
+    };
   }
 </script>
 </body>
