@@ -125,10 +125,20 @@
     transition: opacity var(--slower) var(--ease);
     user-select: none;
   }
-  .invitation:hover,
-  .invitation:focus-visible {
+  /* Hover only lifts an invitation while on home. Once an experiment is
+     active, the invitation rule below takes over and hover is ignored. */
+  body[data-experiment="none"] .invitation:hover,
+  body[data-experiment="none"] .invitation:focus-visible {
     opacity: 0.9 !important;
     outline: none;
+  }
+  /* During any experiment: invitations are hidden AND non-interactive — hover
+     can't resurrect them even if the cursor happens to rest on one. */
+  body[data-experiment="minute"] .invitation,
+  body[data-experiment="gaze"]   .invitation,
+  body[data-experiment="stone"]  .invitation {
+    opacity: 0 !important;
+    pointer-events: none;
   }
 
   /* The breath */
@@ -348,7 +358,8 @@
 
   /* Knobs vanish during any experiment */
   body[data-experiment="minute"] .knobs,
-  body[data-experiment="gaze"]   .knobs {
+  body[data-experiment="gaze"]   .knobs,
+  body[data-experiment="stone"]  .knobs {
     opacity: 0;
     pointer-events: none;
   }
@@ -375,7 +386,8 @@
   .clock:focus-visible { opacity: 0.7; outline: none; }
   /* Mirror the knobs' hide-during-experiment rule */
   body[data-experiment="minute"] .clock,
-  body[data-experiment="gaze"]   .clock {
+  body[data-experiment="gaze"]   .clock,
+  body[data-experiment="stone"]  .clock {
     opacity: 0;
     pointer-events: none;
   }
@@ -410,7 +422,8 @@
     transition: opacity 0.8s var(--ease);
   }
   body[data-experiment="minute"] .words-panel,
-  body[data-experiment="gaze"]   .words-panel {
+  body[data-experiment="gaze"]   .words-panel,
+  body[data-experiment="stone"]  .words-panel {
     opacity: 0 !important;
     pointer-events: none;
   }
