@@ -237,6 +237,23 @@
     bottom: auto;
     top: 28vh;
   }
+  /* Secondary "how" line sits just below the primary hint. Smaller, more
+     faded — reads as parenthetical, not instructional. */
+  #stone-how {
+    position: absolute;
+    top: calc(28vh + 1.6em);
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 0.72rem;
+    font-style: italic;
+    font-weight: 300;
+    letter-spacing: 0.04em;
+    opacity: 0;
+    margin: 0;
+    transition: opacity var(--slower) var(--ease);
+    pointer-events: none;
+  }
+  body[data-step="stone-wait"] #stone-how { opacity: 0.4; }
 
   /* State-driven visibility — dual attributes on <body>:
      data-experiment: "none" | "minute" | "gaze"   (null when on home)
@@ -436,6 +453,7 @@
     <p id="kept">kept in today</p>
     <p id="rest-line">rest.</p>
     <p id="stone-hint"></p>
+    <p id="stone-how" aria-hidden="true"></p>
   </main>
   <div id="words-panel" class="words-panel" aria-hidden="true" hidden></div>
   <nav class="knobs" aria-label="controls">
@@ -863,7 +881,7 @@
       prompt: "leave a word, or close your eyes and go",
       kept: "kept in today",
       rest: "rest.",
-      stone: { hold: "hold", let: "let go" },
+      stone: { hold: "hold", let: "let go", how: "space or tap" },
       sounds: { silent: "silent", hum: "hum", wind: "wind", water: "water" },
       scenes: { breath: "breath", tide: "tide", lights: "lights" },
       words: "words",
@@ -874,7 +892,7 @@
       prompt: "deixa uma palavra, ou fecha os olhos e vai",
       kept: "guardado hoje",
       rest: "descansa.",
-      stone: { hold: "segura", let: "solta" },
+      stone: { hold: "segura", let: "solta", how: "espaço ou toca" },
       sounds: { silent: "silêncio", hum: "murmúrio", wind: "vento", water: "água" },
       scenes: { breath: "respiro", tide: "maré", lights: "luzes" },
       words: "palavras",
@@ -1409,17 +1427,30 @@
   // A kinetic ritual. A soft stone sits at centre-low. Press anywhere (or hold
   // Space) to "pick it up" — it lifts and sways gently as if held in the hand.
   // Release to let it fall and dissolve. No time limit; Escape cancels.
-  const STONE_LIFT_MS = 1000;   // how long the lift animation takes
+  //
+  // The stone has weight that varies across the day: lightest around 9h (after
+  // rest), heaviest around 21h (carrying the day's accumulation). Adenosine-
+  // style sleep pressure, visualised.
+  const STONE_LIFT_MS = 1000;   // base lift duration (scaled by weight factor)
   const STONE_RELEASE_MS = 1800; // total release duration (fall + fade)
   const STONE_FALL_MS = 1000;    // stone visually falls within the first ~1s of release
-  const STONE_SWAY_PERIOD_MS = 4000; // slow breath-like sway when held
+  const STONE_SWAY_PERIOD_MS = 4000; // base sway period (scaled by weight factor)
 
   let stoneState = "idle"; // "idle" | "wait" | "held" | "releasing"
   let stoneHoldStart = 0;   // time of press
   let stoneReleaseStart = 0;
   let stoneReleaseTimer = null;
+  let stoneThudTimer = null;
   const stonePointers = new Set();
   let stoneSpaceHeld = false;
+
+  // Weight factor 0.7 → 1.3, peaking around 21h, troughing around 9h.
+  function stoneWeightFactor() {
+    const h = hourFrac();
+    // Phase: h=9 → -π/2 (trough), h=21 → π/2 (peak). 24h cycle.
+    const phase = ((h - 9) / 24) * Math.PI * 2 - Math.PI / 2;
+    return 1 + Math.sin(phase) * 0.3;
+  }
 
   function stoneHintText() {
     if (stoneState === "releasing") return STRINGS[LANG].stone.let;
@@ -1427,6 +1458,7 @@
   }
   function updateStoneHint() {
     document.getElementById("stone-hint").textContent = stoneHintText();
+    document.getElementById("stone-how").textContent = STRINGS[LANG].stone.how;
   }
 
   function stoneStart() {
@@ -1434,6 +1466,7 @@
     stonePointers.clear();
     stoneSpaceHeld = false;
     clearTimeout(stoneReleaseTimer);
+    clearTimeout(stoneThudTimer);
     updateStoneHint();
     setStep("stone-wait");
   }
@@ -1449,11 +1482,19 @@
   function stonePressEnd() {
     if (currentExperiment !== "stone") return;
     if (stoneState !== "held") return;
+    const weight = stoneWeightFactor();
     stoneState = "releasing";
     stoneReleaseStart = performance.now();
     updateStoneHint();
     setStep("stone-release");
     clearTimeout(stoneReleaseTimer);
+    clearTimeout(stoneThudTimer);
+    // Thud fires when the stone reaches ground (~STONE_FALL_MS into the release)
+    stoneThudTimer = setTimeout(() => {
+      if (currentExperiment === "stone" && stoneState === "releasing") {
+        playStoneThud(weight);
+      }
+    }, STONE_FALL_MS);
     stoneReleaseTimer = setTimeout(() => {
       if (currentExperiment !== "stone") return;
       if (stoneState !== "releasing") return;
@@ -1467,7 +1508,45 @@
     stonePointers.clear();
     stoneSpaceHeld = false;
     clearTimeout(stoneReleaseTimer);
+    clearTimeout(stoneThudTimer);
     goHome();
+  }
+
+  // A short low thud. Only plays when an ambient track is active, so silence
+  // stays silent. Pitch + loudness scale with the stone's current weight —
+  // heavier stones thud lower and a touch louder.
+  function playStoneThud(weight) {
+    if (!audioReady || !currentSound || !masterGain) return;
+    const now = audioCtx.currentTime;
+    const w = clamp(weight, 0.6, 1.5);
+
+    // Low body — sine sweep
+    const osc = audioCtx.createOscillator();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(130 / w, now);
+    osc.frequency.exponentialRampToValueAtTime(40 / w, now + 0.3);
+    const bodyG = audioCtx.createGain();
+    const peak = 0.35 + 0.25 * w;
+    bodyG.gain.setValueAtTime(0.0001, now);
+    bodyG.gain.exponentialRampToValueAtTime(peak, now + 0.006);
+    bodyG.gain.exponentialRampToValueAtTime(0.0001, now + 0.55);
+    osc.connect(bodyG); bodyG.connect(masterGain);
+    osc.start(now); osc.stop(now + 0.6);
+
+    // Impact texture — brief bandpassed noise for the "click" of contact
+    const noise = audioCtx.createBufferSource();
+    noise.buffer = createNoiseBuffer(audioCtx, "white");
+    noise.loop = false;
+    const bp = audioCtx.createBiquadFilter();
+    bp.type = "bandpass";
+    bp.frequency.value = 480 / w;
+    bp.Q.value = 1.6;
+    const noiseG = audioCtx.createGain();
+    noiseG.gain.setValueAtTime(0.0001, now);
+    noiseG.gain.exponentialRampToValueAtTime(0.08 * w, now + 0.002);
+    noiseG.gain.exponentialRampToValueAtTime(0.0001, now + 0.09);
+    noise.connect(bp); bp.connect(noiseG); noiseG.connect(masterGain);
+    noise.start(now); noise.stop(now + 0.12);
   }
 
   // Helper: soft radial ellipse on canvas (circular gradient scaled vertically)
@@ -1490,12 +1569,19 @@
 
     const now = performance.now();
     const m = Math.min(W, H);
-    const baseY = H * 0.60;
+    const baseY = H * 0.62;
     const groundY = baseY + m * 0.035; // just under the stone's rest position
     const cx = W / 2;
-    const rx = m * 0.065;
-    const ry = m * 0.038;
-    const liftAmount = m * 0.075;
+
+    // Weight shapes the stone's physical feel — size, sway period + amplitude,
+    // and how long it takes to lift. Computed once per frame from the hour.
+    const weight = stoneWeightFactor();
+    const rx = m * 0.065 * weight;
+    const ry = m * 0.038 * weight;
+    const liftAmount = m * 0.14; // bigger, clearer lift than before
+    const liftDuration = STONE_LIFT_MS * weight; // heavier = slower lift
+    const swayPeriod = STONE_SWAY_PERIOD_MS * weight;
+    const swayAmp = m * 0.006 * weight;
 
     let lift = 0;         // 0 = resting, 1 = fully raised
     let alpha = 0.75;
@@ -1505,7 +1591,7 @@
       alpha = 0.75;
     } else if (stoneState === "held") {
       const elapsed = now - stoneHoldStart;
-      const raised = clamp(elapsed / STONE_LIFT_MS, 0, 1);
+      const raised = clamp(elapsed / liftDuration, 0, 1);
       lift = easeInOutSine(raised);
       alpha = 0.8 + 0.15 * lift;
     } else if (stoneState === "releasing") {
@@ -1519,11 +1605,11 @@
 
     if (alpha <= 0.01) return;
 
-    // Sway — only while fully lifted and held
+    // Sway — only while fully lifted and held. Heavier stones sway slower, wider.
     let sway = 0;
     if (stoneState === "held" && lift > 0.95) {
-      const holdElapsed = now - stoneHoldStart - STONE_LIFT_MS;
-      sway = Math.sin((holdElapsed / STONE_SWAY_PERIOD_MS) * Math.PI * 2) * m * 0.005;
+      const holdElapsed = now - stoneHoldStart - liftDuration;
+      sway = Math.sin((holdElapsed / swayPeriod) * Math.PI * 2) * swayAmp;
     }
 
     const stoneY = baseY - liftAmount * lift + sway;
