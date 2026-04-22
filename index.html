@@ -217,7 +217,8 @@
 
   /* Kept in today */
   #kept,
-  #rest-line {
+  #rest-line,
+  #stone-hint {
     position: absolute;
     bottom: 8vh;
     left: 50%;
@@ -230,6 +231,11 @@
     margin: 0;
     transition: opacity var(--slower) var(--ease);
     pointer-events: none;
+  }
+  /* The stone hint sits higher — above where the stone is drawn */
+  #stone-hint {
+    bottom: auto;
+    top: 28vh;
   }
 
   /* State-driven visibility — dual attributes on <body>:
@@ -255,6 +261,9 @@
   body[data-step="still"]     #kept      { opacity: 0.75; }
   /* Rest line shows briefly at the end of a Gaze */
   body[data-step="gaze-rest"] #rest-line { opacity: 0.75; }
+  /* Stone hint: "hold" while waiting, "let go" on release */
+  body[data-step="stone-wait"]    #stone-hint { opacity: 0.7; }
+  body[data-step="stone-release"] #stone-hint { opacity: 0.7; }
 
   /* Discreet knobs at the bottom — present, never loud */
   .knobs {
@@ -426,6 +435,7 @@
     </div>
     <p id="kept">kept in today</p>
     <p id="rest-line">rest.</p>
+    <p id="stone-hint"></p>
   </main>
   <div id="words-panel" class="words-panel" aria-hidden="true" hidden></div>
   <nav class="knobs" aria-label="controls">
@@ -822,6 +832,12 @@
       enter: () => gazeStart(),
       draw:  (t, pal) => gazeDraw(t, pal),
     },
+    {
+      id: "stone",
+      label: () => STRINGS[LANG].experiments.stone,
+      enter: () => stoneStart(),
+      draw:  (t, pal) => stoneDraw(t, pal),
+    },
   ];
 
   // ────── Ambient → Invited ──────
@@ -843,20 +859,22 @@
 
   const STRINGS = {
     en: {
-      experiments: { minute: "take a minute", gaze: "a gaze" },
+      experiments: { minute: "take a minute", gaze: "a gaze", stone: "a stone" },
       prompt: "leave a word, or close your eyes and go",
       kept: "kept in today",
       rest: "rest.",
+      stone: { hold: "hold", let: "let go" },
       sounds: { silent: "silent", hum: "hum", wind: "wind", water: "water" },
       scenes: { breath: "breath", tide: "tide", lights: "lights" },
       words: "words",
     },
     pt: {
       // EU Portuguese, intimate tu-form; chosen for quiet, not protocol
-      experiments: { minute: "um minuto para ti", gaze: "um olhar" },
+      experiments: { minute: "um minuto para ti", gaze: "um olhar", stone: "uma pedra" },
       prompt: "deixa uma palavra, ou fecha os olhos e vai",
       kept: "guardado hoje",
       rest: "descansa.",
+      stone: { hold: "segura", let: "solta" },
       sounds: { silent: "silêncio", hum: "murmúrio", wind: "vento", water: "água" },
       scenes: { breath: "respiro", tide: "maré", lights: "luzes" },
       words: "palavras",
@@ -1150,14 +1168,47 @@
   // space — home stays home unless you choose a ritual deliberately.
   // During leave-word: Enter submits, Escape quiets home.
   // During gaze: Escape quiets home.
+  // During stone: Space (hold) picks up / lets go; Escape cancels.
   document.addEventListener("keydown", (e) => {
     if (currentStep === "leave-word") {
       if (e.key === "Enter")       { e.preventDefault(); submitWord(); }
       else if (e.key === "Escape") { e.preventDefault(); quietReturn(); }
     } else if (currentExperiment === "gaze") {
       if (e.key === "Escape") { e.preventDefault(); gazeCancel(); }
+    } else if (currentExperiment === "stone") {
+      if (e.key === "Escape") { e.preventDefault(); stoneCancel(); }
+      else if (e.key === " ") {
+        e.preventDefault();
+        if (!stoneSpaceHeld) {
+          stoneSpaceHeld = true;
+          stonePressBegin();
+        }
+      }
     }
   });
+  document.addEventListener("keyup", (e) => {
+    if (currentExperiment === "stone" && e.key === " ") {
+      e.preventDefault();
+      stoneSpaceHeld = false;
+      if (stonePointers.size === 0) stonePressEnd();
+    }
+  });
+  // Pointer (mouse + touch) — only active during the stone ritual
+  document.addEventListener("pointerdown", (e) => {
+    if (currentExperiment !== "stone") return;
+    // Ignore presses on knobs/input so they can still be used during the ritual
+    // (knobs are hidden during experiments anyway, but defensive)
+    if (e.target.closest("input") || e.target.closest("button")) return;
+    stonePointers.add(e.pointerId);
+    if (stonePointers.size === 1 && !stoneSpaceHeld) stonePressBegin();
+  });
+  function onPointerRelease(e) {
+    if (currentExperiment !== "stone") return;
+    stonePointers.delete(e.pointerId);
+    if (stonePointers.size === 0 && !stoneSpaceHeld) stonePressEnd();
+  }
+  document.addEventListener("pointerup", onPointerRelease);
+  document.addEventListener("pointercancel", onPointerRelease);
 
   // ────── The Minute ──────
   async function runMinute() {
@@ -1354,6 +1405,150 @@
   updateClock();
   setInterval(updateClock, 15000);
 
+  // ────── A Stone ──────
+  // A kinetic ritual. A soft stone sits at centre-low. Press anywhere (or hold
+  // Space) to "pick it up" — it lifts and sways gently as if held in the hand.
+  // Release to let it fall and dissolve. No time limit; Escape cancels.
+  const STONE_LIFT_MS = 1000;   // how long the lift animation takes
+  const STONE_RELEASE_MS = 1800; // total release duration (fall + fade)
+  const STONE_FALL_MS = 1000;    // stone visually falls within the first ~1s of release
+  const STONE_SWAY_PERIOD_MS = 4000; // slow breath-like sway when held
+
+  let stoneState = "idle"; // "idle" | "wait" | "held" | "releasing"
+  let stoneHoldStart = 0;   // time of press
+  let stoneReleaseStart = 0;
+  let stoneReleaseTimer = null;
+  const stonePointers = new Set();
+  let stoneSpaceHeld = false;
+
+  function stoneHintText() {
+    if (stoneState === "releasing") return STRINGS[LANG].stone.let;
+    return STRINGS[LANG].stone.hold;
+  }
+  function updateStoneHint() {
+    document.getElementById("stone-hint").textContent = stoneHintText();
+  }
+
+  function stoneStart() {
+    stoneState = "wait";
+    stonePointers.clear();
+    stoneSpaceHeld = false;
+    clearTimeout(stoneReleaseTimer);
+    updateStoneHint();
+    setStep("stone-wait");
+  }
+
+  function stonePressBegin() {
+    if (currentExperiment !== "stone") return;
+    if (stoneState !== "wait") return; // only transition from wait
+    stoneState = "held";
+    stoneHoldStart = performance.now();
+    setStep("stone-held");
+  }
+
+  function stonePressEnd() {
+    if (currentExperiment !== "stone") return;
+    if (stoneState !== "held") return;
+    stoneState = "releasing";
+    stoneReleaseStart = performance.now();
+    updateStoneHint();
+    setStep("stone-release");
+    clearTimeout(stoneReleaseTimer);
+    stoneReleaseTimer = setTimeout(() => {
+      if (currentExperiment !== "stone") return;
+      if (stoneState !== "releasing") return;
+      stoneState = "idle";
+      goHome();
+    }, STONE_RELEASE_MS);
+  }
+
+  function stoneCancel() {
+    stoneState = "idle";
+    stonePointers.clear();
+    stoneSpaceHeld = false;
+    clearTimeout(stoneReleaseTimer);
+    goHome();
+  }
+
+  // Helper: soft radial ellipse on canvas (circular gradient scaled vertically)
+  function drawSoftEllipse(cx, cy, rx, ry, colorRGB, innerA, outerA) {
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.scale(1, ry / rx);
+    const g = ctx.createRadialGradient(0, 0, 0, 0, 0, rx);
+    g.addColorStop(0,   rgba(colorRGB, innerA));
+    g.addColorStop(0.5, rgba(colorRGB, innerA * 0.45));
+    g.addColorStop(1,   rgba(colorRGB, outerA));
+    ctx.fillStyle = g;
+    ctx.fillRect(-rx, -rx, rx * 2, rx * 2);
+    ctx.restore();
+  }
+
+  function stoneDraw(_t, pal) {
+    if (currentExperiment !== "stone") return;
+    if (stoneState === "idle") return;
+
+    const now = performance.now();
+    const m = Math.min(W, H);
+    const baseY = H * 0.60;
+    const groundY = baseY + m * 0.035; // just under the stone's rest position
+    const cx = W / 2;
+    const rx = m * 0.065;
+    const ry = m * 0.038;
+    const liftAmount = m * 0.075;
+
+    let lift = 0;         // 0 = resting, 1 = fully raised
+    let alpha = 0.75;
+
+    if (stoneState === "wait") {
+      lift = 0;
+      alpha = 0.75;
+    } else if (stoneState === "held") {
+      const elapsed = now - stoneHoldStart;
+      const raised = clamp(elapsed / STONE_LIFT_MS, 0, 1);
+      lift = easeInOutSine(raised);
+      alpha = 0.8 + 0.15 * lift;
+    } else if (stoneState === "releasing") {
+      const elapsed = now - stoneReleaseStart;
+      const fallT = clamp(elapsed / STONE_FALL_MS, 0, 1);
+      // Start the release at lift=1 and fall through an easeIn curve
+      const fall = 1 - (fallT * fallT); // quadratic fall (faster near the end)
+      lift = fall;
+      alpha = 0.95 * (1 - clamp(elapsed / STONE_RELEASE_MS, 0, 1));
+    }
+
+    if (alpha <= 0.01) return;
+
+    // Sway — only while fully lifted and held
+    let sway = 0;
+    if (stoneState === "held" && lift > 0.95) {
+      const holdElapsed = now - stoneHoldStart - STONE_LIFT_MS;
+      sway = Math.sin((holdElapsed / STONE_SWAY_PERIOD_MS) * Math.PI * 2) * m * 0.005;
+    }
+
+    const stoneY = baseY - liftAmount * lift + sway;
+
+    // Shadow on the ground — compresses + fades as the stone rises
+    const shadowAlpha = 0.35 * (1 - lift * 0.6) * (alpha / 0.9);
+    if (shadowAlpha > 0.01) {
+      const sRx = rx * (1 + lift * 0.25);
+      const sRy = ry * 0.35 * (1 - lift * 0.35);
+      drawSoftEllipse(cx, groundY, sRx, sRy, [0.02, 0.02, 0.06], shadowAlpha, 0);
+    }
+
+    // Soft glow around the stone (palette accent for the hue of the moment)
+    const glowR = Math.max(rx, ry) * 2.6;
+    const glowGrad = ctx.createRadialGradient(cx, stoneY, 0, cx, stoneY, glowR);
+    glowGrad.addColorStop(0, rgba(pal.accent, 0.22 * alpha));
+    glowGrad.addColorStop(1, rgba(pal.accent, 0));
+    ctx.fillStyle = glowGrad;
+    ctx.fillRect(cx - glowR, stoneY - glowR, glowR * 2, glowR * 2);
+
+    // The stone itself — uses pal.ink for auto-contrast (dark on light bg,
+    // light on dark bg) so the stone always reads as a physical presence.
+    drawSoftEllipse(cx, stoneY, rx, ry, pal.ink, 0.85 * alpha, 0);
+  }
+
   // ────── Tab visibility: pause invitation timing while hidden ──────
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
@@ -1440,9 +1635,10 @@
       setHome, setExperiment, setStep, goHome, enterExperiment,
       renderStill, submitWord, quietReturn,
       gazeStart, gazeCancel,
+      stoneStart, stonePressBegin, stonePressEnd, stoneCancel,
       setSoundTrack, cycleSound,
       refreshWordsKnob,
-      state: () => ({ home: currentHome, experiment: currentExperiment, step: currentStep, sound: currentSound }),
+      state: () => ({ home: currentHome, experiment: currentExperiment, step: currentStep, sound: currentSound, stoneState }),
       freshSeedPeek: () => freshSeed,
     };
   }
