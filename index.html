@@ -73,6 +73,8 @@
   }
 
   /* The mark: w/in — now a small quiet identity at the left of the knobs bar.
+     Same horizontal padding as .knob so the gap between the mark and its
+     neighbour separator matches the gap between a knob and its separator.
      No breath animation (per design choice to keep the bar still). */
   #mark {
     font-size: 1rem;
@@ -82,6 +84,7 @@
     line-height: 1;
     display: inline-flex;
     align-items: baseline;
+    padding: 0.2em 0.82rem; /* 0.82rem matches a .knob's horizontal padding (1em at 0.82rem font) */
     opacity: 0.72;
     transition: opacity var(--slower) var(--ease);
     user-select: none;
@@ -316,20 +319,37 @@
     text-align: center;
   }
   .knob-sep { opacity: 0.35; }
-  /* Thin vertical separator between the w/in mark and the knobs */
-  .knob-sep-v {
-    display: inline-block;
-    width: 1px;
-    height: 0.9em;
-    background: currentColor;
-    opacity: 0.28;
-    align-self: center;
-    margin: 0 0.05em;
-  }
 
   /* Knobs vanish during any experiment */
   body[data-experiment="minute"] .knobs,
   body[data-experiment="gaze"]   .knobs {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  /* Clock — a quiet hour/minute readout aligned with the knobs bar */
+  .clock {
+    position: fixed;
+    bottom: clamp(1.25rem, 3.5vh, 2.6rem);
+    right: clamp(1.2rem, 3vw, 2.2rem);
+    margin: 0;
+    padding: 0.2em 0;
+    font-size: 0.82rem;
+    font-style: italic;
+    font-weight: 300;
+    letter-spacing: 0.02em;
+    color: inherit;
+    opacity: 0.28;
+    transition: opacity var(--slower) var(--ease);
+    z-index: 2;
+    user-select: none;
+    font-variant-numeric: tabular-nums; /* keep digit widths stable */
+  }
+  .clock:hover,
+  .clock:focus-visible { opacity: 0.7; outline: none; }
+  /* Mirror the knobs' hide-during-experiment rule */
+  body[data-experiment="minute"] .clock,
+  body[data-experiment="gaze"]   .clock {
     opacity: 0;
     pointer-events: none;
   }
@@ -377,6 +397,17 @@
     .knobs { font-size: 0.78rem; gap: 0.7rem; }
     #mark { font-size: 0.95rem; }
   }
+  /* On narrow screens, the knobs bar can grow wide enough to collide with
+     the clock at the bottom-right. Lift the clock to its own centered row
+     just above the bar, preserving the "bottom strip" feel. */
+  @media (max-width: 560px) {
+    .clock {
+      right: auto;
+      left: 50%;
+      transform: translateX(-50%);
+      bottom: calc(clamp(1.25rem, 3.5vh, 2.6rem) + 2.2em);
+    }
+  }
 </style>
 </head>
 <body data-home="ambient" data-experiment="none" data-step="">
@@ -401,7 +432,7 @@
     <div id="mark" aria-label="within">
       <span id="mark-inner"><span class="w">w</span><span class="slash">/</span><span class="in">in</span></span>
     </div>
-    <span class="knob-sep-v" aria-hidden="true"></span>
+    <span class="knob-sep" aria-hidden="true">·</span>
     <button id="btn-sound" class="knob" type="button" aria-pressed="false">
       <span class="dot" aria-hidden="true"></span><span class="label">sound</span>
     </button>
@@ -414,6 +445,7 @@
       <span class="dot" aria-hidden="true"></span><span class="label">words</span>
     </button>
   </nav>
+  <p id="clock" class="clock" aria-label="time"></p>
 
 <script type="module">
   "use strict";
@@ -798,7 +830,7 @@
     clearTimeout(invitationTimer);
     invitationTimer = setTimeout(() => {
       if (isHome() && currentHome === "ambient") setHome("invited");
-    }, 4200);
+    }, 2000);
   }
   scheduleInvitation();
 
@@ -1112,30 +1144,18 @@
     cycleScene();
   });
 
-  // ────── Global input: home affordance + per-experiment keys ──────
-  // On home: Space/Enter/tap runs the first invitation (keeps current muscle memory for the Minute).
+  // ────── Per-experiment keyboard ──────
+  // Experiments start only by clicking an invitation (wired on each .invitation
+  // button). The page itself no longer reacts to Space or to taps on empty
+  // space — home stays home unless you choose a ritual deliberately.
   // During leave-word: Enter submits, Escape quiets home.
   // During gaze: Escape quiets home.
   document.addEventListener("keydown", (e) => {
-    if (isHome() && e.key === " ") {
-      e.preventDefault();
-      const first = EXPERIMENTS[0];
-      if (first) enterExperiment(first.id);
-      return;
-    }
     if (currentStep === "leave-word") {
       if (e.key === "Enter")       { e.preventDefault(); submitWord(); }
       else if (e.key === "Escape") { e.preventDefault(); quietReturn(); }
     } else if (currentExperiment === "gaze") {
       if (e.key === "Escape") { e.preventDefault(); gazeCancel(); }
-    }
-  });
-
-  document.addEventListener("pointerdown", (e) => {
-    if (e.target.closest("input") || e.target.closest(".invitation") || e.target.closest(".knob")) return;
-    if (isHome()) {
-      const first = EXPERIMENTS[0];
-      if (first) enterExperiment(first.id);
     }
   });
 
@@ -1322,6 +1342,18 @@
     ctx.fillRect(x - r, y - r, r * 2, r * 2);
   }
 
+  // ────── Clock ──────
+  // Quiet hour:minute readout at the bottom-right of the home, aligned with
+  // the knobs bar. Locale-aware: EN gets 12-hour with am/pm, PT gets 24-hour.
+  // Ticks every 15s — enough to stay fresh, not enough to feel restless.
+  const clockEl = document.getElementById("clock");
+  const clockFmt = new Intl.DateTimeFormat(LANG, { hour: "2-digit", minute: "2-digit" });
+  function updateClock() {
+    clockEl.textContent = clockFmt.format(new Date()).toLowerCase();
+  }
+  updateClock();
+  setInterval(updateClock, 15000);
+
   // ────── Tab visibility: pause invitation timing while hidden ──────
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
@@ -1329,6 +1361,8 @@
     } else if (isHome() && currentHome === "ambient") {
       scheduleInvitation();
     }
+    // Refresh the clock on return to foreground
+    if (!document.hidden) updateClock();
   });
 
   // ────── Words knob: reveal the collection of kept words for today ──────
