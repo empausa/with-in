@@ -265,6 +265,25 @@
   }
   body[data-step="stone-wait"] #stone-how { opacity: 0.4; }
 
+  /* "release when it feels right" — a gentle permission that fades in
+     after the "hold" cue has gone, holds for ~2s, then fades itself. */
+  #stone-permission {
+    position: absolute;
+    top: 28vh;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 0.85rem;
+    font-style: italic;
+    font-weight: 300;
+    letter-spacing: 0.03em;
+    opacity: 0;
+    margin: 0;
+    transition: opacity 1.2s var(--ease);
+    pointer-events: none;
+    white-space: nowrap;
+    text-align: center;
+  }
+
   /* State-driven visibility — dual attributes on <body>:
      data-experiment: "none" | "minute" | "gaze"   (null when on home)
      data-home:       "ambient" | "invited"         (only meaningful when experiment="none")
@@ -355,6 +374,17 @@
     text-align: center;
   }
   .knob-sep { opacity: 0.35; }
+  /* Thin vertical separator — only between the w/in mark (identity) and the
+     knobs (controls). Middots carry the rhythm between knobs themselves. */
+  .knob-sep-v {
+    display: inline-block;
+    width: 1px;
+    height: 0.9em;
+    background: currentColor;
+    opacity: 0.28;
+    align-self: center;
+    margin: 0 0.05em;
+  }
 
   /* Knobs vanish during any experiment */
   body[data-experiment="minute"] .knobs,
@@ -467,13 +497,14 @@
     <p id="rest-line">rest.</p>
     <p id="stone-hint"></p>
     <p id="stone-how" aria-hidden="true"></p>
+    <p id="stone-permission" aria-hidden="true"></p>
   </main>
   <div id="words-panel" class="words-panel" aria-hidden="true" hidden></div>
   <nav class="knobs" aria-label="controls">
     <div id="mark" aria-label="within">
       <span id="mark-inner"><span class="w">w</span><span class="slash">/</span><span class="in">in</span></span>
     </div>
-    <span class="knob-sep" aria-hidden="true">·</span>
+    <span class="knob-sep-v" aria-hidden="true"></span>
     <button id="btn-sound" class="knob" type="button" aria-pressed="false">
       <span class="dot" aria-hidden="true"></span><span class="label">sound</span>
     </button>
@@ -894,7 +925,7 @@
       prompt: "leave a word, or close your eyes and go",
       kept: "kept in today",
       rest: "rest.",
-      stone: { hold: "hold", let: "let go", how: "space or tap" },
+      stone: { hold: "hold", let: "let go", how: "space or tap", release: "release when it feels right" },
       sounds: { silent: "silent", hum: "hum", wind: "wind", water: "water" },
       scenes: { breath: "breath", tide: "tide", lights: "lights" },
       words: "words",
@@ -905,7 +936,7 @@
       prompt: "deixa uma palavra, ou fecha os olhos e vai",
       kept: "guardado hoje",
       rest: "descansa.",
-      stone: { hold: "segura", let: "solta", how: "espaço ou toca" },
+      stone: { hold: "segura", let: "solta", how: "espaço ou toca", release: "solta quando sentires" },
       sounds: { silent: "silêncio", hum: "murmúrio", wind: "vento", water: "água" },
       scenes: { breath: "respiro", tide: "maré", lights: "luzes" },
       words: "palavras",
@@ -1454,6 +1485,8 @@
   let stoneReleaseStart = 0;
   let stoneReleaseTimer = null;
   let stoneThudTimer = null;
+  let stonePermissionShowTimer = null; // fades in "release when it feels right"
+  let stonePermissionHideTimer = null; // fades it back out
   const stonePointers = new Set();
   let stoneSpaceHeld = false;
 
@@ -1472,6 +1505,13 @@
   function updateStoneHint() {
     document.getElementById("stone-hint").textContent = stoneHintText();
     document.getElementById("stone-how").textContent = STRINGS[LANG].stone.how;
+    document.getElementById("stone-permission").textContent = STRINGS[LANG].stone.release;
+  }
+  function clearStonePermission() {
+    clearTimeout(stonePermissionShowTimer);
+    clearTimeout(stonePermissionHideTimer);
+    const el = document.getElementById("stone-permission");
+    if (el) el.style.opacity = "0";
   }
 
   function stoneStart() {
@@ -1480,6 +1520,7 @@
     stoneSpaceHeld = false;
     clearTimeout(stoneReleaseTimer);
     clearTimeout(stoneThudTimer);
+    clearStonePermission();
     updateStoneHint();
     setStep("stone-wait");
   }
@@ -1490,6 +1531,20 @@
     stoneState = "held";
     stoneHoldStart = performance.now();
     setStep("stone-held");
+    // After the "hold" hint fades away (~2.2s), whisper "release when it feels
+    // right" — gentle permission. Show it for ~2s, then fade it too.
+    clearStonePermission();
+    const permEl = document.getElementById("stone-permission");
+    stonePermissionShowTimer = setTimeout(() => {
+      if (currentExperiment === "stone" && stoneState === "held") {
+        permEl.style.opacity = "0.55";
+      }
+    }, 2300);
+    stonePermissionHideTimer = setTimeout(() => {
+      if (currentExperiment === "stone" && stoneState === "held") {
+        permEl.style.opacity = "0";
+      }
+    }, 5500); // 2300 (show) + 1200 (fade-in) + ~2000 (hold) = 5500
   }
 
   function stonePressEnd() {
@@ -1502,6 +1557,7 @@
     setStep("stone-release");
     clearTimeout(stoneReleaseTimer);
     clearTimeout(stoneThudTimer);
+    clearStonePermission();
     // Thud fires when the stone reaches ground (~STONE_FALL_MS into the release)
     stoneThudTimer = setTimeout(() => {
       if (currentExperiment === "stone" && stoneState === "releasing") {
@@ -1522,6 +1578,7 @@
     stoneSpaceHeld = false;
     clearTimeout(stoneReleaseTimer);
     clearTimeout(stoneThudTimer);
+    clearStonePermission();
     goHome();
   }
 
